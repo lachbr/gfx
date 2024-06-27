@@ -2,25 +2,36 @@
 #include <iostream>
 #include <assert.h>
 #include <vector>
+#include <algorithm>
+#include <fstream>
+#include <unordered_set>
+
+typedef uint32_t u32;
+typedef uint16_t u16;
+typedef uint8_t u8;
+typedef uint64_t u64;
+typedef int64_t s64;
+typedef int32_t s32;
+typedef int16_t s16;
+typedef int8_t s8;
+typedef float f32;
+typedef double f64;
+
+using std::vector;
 
 #undef UNICODE
+#define NOMINMAX
 #include <windows.h>
 
-#define VK_USE_PLATFORM_WIN32_KHR
-#define VK_PROTOTYPES
-#include <vulkan/vulkan.h>
+#include "renderer.hxx"
+
+#include "linmath.hxx"
 
 // Windows
 WNDCLASS wc = { };
 const char *wnd_class_name = "gfxwndclass";
 HWND hwnd = nullptr;
 bool window_closed = false;
-
-// Vk
-VkInstance vk_instance = nullptr;
-VkDevice vk_device = nullptr;
-VkCommandPool vk_cmd_pool = nullptr;
-VkCommandBuffer vk_cmd_buffer = nullptr;
 
 LRESULT APIENTRY
 window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -32,14 +43,6 @@ window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     std::cerr << "Window destroyed\n";
     window_closed = true;
     PostQuitMessage(0);
-    return 0;
-  case WM_PAINT:
-    {
-      PAINTSTRUCT ps;
-      HDC hdc = BeginPaint(hwnd, &ps);
-      FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
-      EndPaint(hwnd, &ps);
-    }
     return 0;
   }
   return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -66,200 +69,35 @@ make_window() {
 void
 update_window() {
   MSG msg;
-  GetMessage(&msg, nullptr, 0, 0);
-  TranslateMessage(&msg);
-  DispatchMessage(&msg);
-}
-
-std::string
-vk_physical_device_type_to_string(VkPhysicalDeviceType type) {
-  switch (type) {
-  case VK_PHYSICAL_DEVICE_TYPE_OTHER:
-    return "Other";
-  case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
-    return "Integrated GPU";
-  case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
-    return "Discrete GPU";
-  case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
-    return "Virtual GPU";
-  case VK_PHYSICAL_DEVICE_TYPE_CPU:
-    return "GPU";
-  default:
-    return "Unknown";
+  if (PeekMessage(&msg, hwnd, 0, 0, PM_REMOVE)) {
+    TranslateMessage(&msg);
+    DispatchMessage(&msg);
   }
 }
 
-bool
-init_vk() {
-  VkApplicationInfo app_info = {
-    VK_STRUCTURE_TYPE_APPLICATION_INFO,
-    nullptr,
-    "GFX",
-    1,
-    "GFX",
-    1,
-    VK_API_VERSION_1_0
-  };
-  const char *extension_names[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
-  uint32_t extension_count = 2;
-  VkInstanceCreateInfo create_info = {
-    VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-    nullptr,
-    0,
-    &app_info,
-    0, nullptr,
-    extension_count, extension_names
-  };
-  VkResult result = vkCreateInstance(&create_info, nullptr, &vk_instance);
-  if (result == VK_ERROR_INCOMPATIBLE_DRIVER) {
-    std::cerr << "cannot find a compatible Vulkan ICD\n";
-    return false;
-  } else if (result) {
-    std::cerr << "Could not initialize vulkan\n";
-    return false;
-  } else {
-    std::cerr << "Vulkan initialized\n";
-  }
+std::unordered_set<VertexData *> queued_vertex_data;
+VkVertexBuffer *vk_buf;
 
-  // Enumerate devices.
-
-  uint32_t device_count = 0;
-  std::vector<VkPhysicalDevice> devices;
-  result = vkEnumeratePhysicalDevices(vk_instance, &device_count, nullptr);
-  assert(!result);
-  devices.resize(device_count);
-  result = vkEnumeratePhysicalDevices(vk_instance, &device_count, devices.data());
-  assert(!result);
-
-  std::vector<VkPhysicalDeviceProperties> device_prop_list;
-  device_prop_list.resize(device_count);
-  for (uint32_t i = 0; i < device_count; ++i) {
-    vkGetPhysicalDeviceProperties(devices[i], &device_prop_list[i]);
-  }
-
-  // Pick in the order of: discrete, integrated, virtual.
-
-  int chosen_device = -1;
-
-  std::cerr << device_count << " graphics devices\n";
-  for (uint32_t i = 0; i < device_count; ++i) {
-    std::cerr << "Device " << i << "\n";
-    VkPhysicalDeviceProperties &device_props = device_prop_list[i];
-    std::cerr << "Name: " << std::string(device_props.deviceName) << "\n";
-    std::cerr << "Type: " << vk_physical_device_type_to_string(device_props.deviceType) << "\n";
-    std::cerr << "Vendor ID: " << device_props.vendorID << "\n";
-    std::cerr << "Device ID: " << device_props.deviceID << "\n";
-    std::cerr << "Driver version: " << device_props.driverVersion << "\n";
-    std::cerr << "VK API version: "
-              << "variant " << VK_API_VERSION_VARIANT(device_props.apiVersion) << " "
-              << "ver " << VK_API_VERSION_MAJOR(device_props.apiVersion) << "."
-              << VK_API_VERSION_MINOR(device_props.apiVersion) << "."
-              << VK_API_VERSION_PATCH(device_props.apiVersion) << "\n";
-  }
-
-  // First look for discrete.
-  for (int i = 0; i < (int)device_prop_list.size(); ++i) {
-    if (device_prop_list[i].deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-      chosen_device = i;
-      break;
+void
+render_frame(RendererVk *render) {
+  render->begin_prepare();
+  if (queued_vertex_data.size() > 0u) {
+    for (VertexData *data : queued_vertex_data) {
+      render->prepare_vertex_data(data, &vk_buf);
     }
+    queued_vertex_data.clear();
   }
-  if (chosen_device == -1) {
-    // Don't have a discrete, look for integrated.
-    for (int i = 0; i < (int)device_prop_list.size(); ++i) {
-      if (device_prop_list[i].deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
-        chosen_device = i;
-        break;
-      }
-    }
-  }
-  if (chosen_device == -1) {
-    // Didn't get a discrete or integrated chip.  Fail.
-    std::cerr << "No discrete or integrated graphics device available!\n";
-    return false;
-  }
+  render->end_prepare();
 
-  std::cerr << "Using graphics device " << chosen_device << " (" << std::string(device_prop_list[chosen_device].deviceName) << ")\n";
+  render->begin_frame();
 
-  uint32_t queue_family_count = 0;
-  vkGetPhysicalDeviceQueueFamilyProperties(devices[chosen_device], &queue_family_count, nullptr);
-  std::vector<VkQueueFamilyProperties> queue_props;
-  queue_props.resize(queue_family_count);
-  vkGetPhysicalDeviceQueueFamilyProperties(devices[chosen_device], &queue_family_count, queue_props.data());
+  render->begin_frame_surface();
 
-  float queue_prior[1] = { 0.0f };
-  VkDeviceQueueCreateInfo queue_info = { };
-  queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-  queue_info.pNext = nullptr;
-  queue_info.queueCount = 1;
-  queue_info.pQueuePriorities = queue_prior;
-  for (uint32_t i = 0; i < queue_family_count; ++i) {
-    if (queue_props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-      // Grab the graphics queue.
-      queue_info.queueFamilyIndex = i;
-    }
-  }
+  render->draw(&vk_buf, 1, 0, 3);
 
-  const char *device_extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-  uint32_t device_extension_count = 1;
-  VkDeviceCreateInfo device_info = { };
-  device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-  device_info.pNext = nullptr;
-  device_info.queueCreateInfoCount = 1;
-  device_info.pQueueCreateInfos = &queue_info;
-  device_info.enabledExtensionCount = device_extension_count;
-  device_info.ppEnabledExtensionNames = device_extensions;
-  device_info.enabledLayerCount = 0;
-  device_info.ppEnabledLayerNames = nullptr;
-  device_info.pEnabledFeatures = nullptr;
+  render->end_frame_surface();
 
-  result = vkCreateDevice(devices[chosen_device], &device_info, nullptr, &vk_device);
-  if (result != VK_SUCCESS) {
-    std::cerr << "Failed to create vulkan device\n";
-    return false;
-  } else {
-    std::cerr << "Created vulkan device\n";
-  }
-
-  VkCommandPoolCreateInfo pool_info = { };
-  pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-  pool_info.pNext = nullptr;
-  pool_info.queueFamilyIndex = queue_info.queueFamilyIndex;
-  pool_info.flags = 0;
-
-  result = vkCreateCommandPool(vk_device, &pool_info, nullptr, &vk_cmd_pool);
-  if (result != VK_SUCCESS) {
-    std::cerr << "Couldn't create vk command pool\n";
-    return false;
-  }
-
-  VkCommandBufferAllocateInfo cmd = { };
-  cmd.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  cmd.pNext = nullptr;
-  cmd.commandPool = vk_cmd_pool;
-  cmd.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cmd.commandBufferCount = 1;
-
-  result = vkAllocateCommandBuffers(vk_device, &cmd, &vk_cmd_buffer);
-  if (result != VK_SUCCESS) {
-    std::cerr << "Couldn't create vk command buffer\n";
-  }
-
-  VkBool32 *supports_present = (VkBool32 *)alloca(queue_family_count * sizeof(VkBool32));
-
-  for (uint32_t i = 0; i < queue_family_count; ++i) {
-    vkGetPhysicalDeviceSurfaceSupportKHR(devices[chosen_device], i,
-  }
-
-
-  return true;
-}
-
-void close_vk() {
-  vkDestroyInstance(vk_instance, nullptr);
-  vk_instance = nullptr;
-
-  std::cerr << "Vulkan shut down\n";
+  render->end_frame();
 }
 
 int
@@ -267,15 +105,48 @@ main(int argc, char *argv[]) {
   make_window_class();
   make_window();
 
-  if (!init_vk()) {
+  RendererVk render;
+  if (!render.initialize(hwnd)) {
     return 1;
   }
 
+  VertexData vdata;
+  vdata.format.num_arrays = 1;
+  vdata.format.array_formats = { MaterialEnums::vertex_column_flag(MaterialEnums::VC_position) | MaterialEnums::vertex_column_flag(MaterialEnums::VC_color) };
+  vdata.array_buffers.resize(1);
+  vdata.array_buffers[0].resize(sizeof(float) * 8 * 3);
+  float *fdata = (float *)vdata.array_buffers[0].data();
+  fdata[0] = -1.0f;
+  fdata[1] = 20.0f;
+  fdata[2] = -1.0f;
+  fdata[3] = 1.0f;
+  fdata[4] = 1.0f;
+  fdata[5] = 0.0f;
+  fdata[6] = 0.0f;
+  fdata[7] = 1.0f;
+  fdata[8] = 1.0f;
+  fdata[9] = 20.0f;
+  fdata[10] = -1.0f;
+  fdata[11] = 1.0f;
+  fdata[12] = 0.0f;
+  fdata[13] = 1.0f;
+  fdata[14] = 0.0f;
+  fdata[15] = 1.0f;
+  fdata[16] = 1.0f;
+  fdata[17] = 20.0f;
+  fdata[18] = 1.0f;
+  fdata[19] = 1.0f;
+  fdata[20] = 0.0f;
+  fdata[21] = 0.0f;
+  fdata[22] = 1.0f;
+  fdata[23] = 1.0f;
+
+  queued_vertex_data.insert(&vdata);
+
   while (!window_closed) {
     update_window();
+    render_frame(&render);
   }
-
-  close_vk();
 
   return 0;
 }

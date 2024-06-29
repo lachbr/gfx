@@ -1,12 +1,30 @@
 
-INCLUDE_DIRS = C:\VulkanSDK\1.3.268.0\Include
+VK_INCLUDE_DIR = C:\VulkanSDK\1.3.283.0\Include
+VK_LIB_DIR = C:\VulkanSDK\1.3.283.0\Lib
+VK_LIBS = vulkan-1.lib
+
+CXX_COMPILE_FLAGS = /c /O2 /Z7 /UUNICODE /DNOMINMAX /std:c++20 /I. /I$(VK_INCLUDE_DIR)
+CXX_COMPILER = cl
+
+CXX_LINK_FLAGS = /DEBUG /LIBPATH:$(VK_LIB_DIR) $(VK_LIBS) user32.lib
+CXX_LINKER = link
+
+SOURCE_FILES = main.cxx renderer.cxx material.cxx obj_reader.cxx
+COMPILED_OBJECTS = $(SOURCE_FILES:.cxx=.obj)
+
+TARGET = prog.exe
 
 main.obj : main.cxx
-	cl /c main.cxx /Z7 -IC:\VulkanSDK\1.3.268.0\Include -I. /std:c++20 /UUNICODE /DNOMINMAX /out:main.obj
-renderer.obj : renderer.cxx
-	cl /c renderer.cxx /Z7 -IC:\VulkanSDK\1.3.268.0\Include -I. /std:c++20 /DNOMINMAX /UUNICODE /out:renderer.obj
+	$(CXX_COMPILER) $(CXX_COMPILE_FLAGS) main.cxx /out:main.obj
 material.obj : material.cxx
-	cl /c material.cxx /Z7 -I. /std:c++20 /DNOMINMAX /UUNICODE /out:material.obj
+	$(CXX_COMPILER) $(CXX_COMPILE_FLAGS) material.cxx /out:material.obj
+renderer.obj : renderer.cxx
+	$(CXX_COMPILER) $(CXX_COMPILE_FLAGS) renderer.cxx /out:renderer.obj
+obj_reader.obj : obj_reader.cxx
+	$(CXX_COMPILER) $(CXX_COMPILE_FLAGS) obj_reader.cxx /out:obj_reader.obj
 
-prog.exe : main.obj renderer.obj material.obj
-	link /DEBUG main.obj renderer.obj material.obj user32.lib vulkan-1.lib /LIBPATH:C:\VulkanSDK\1.3.268.0\Lib /out:prog.exe
+clean :
+	del $(COMPILED_OBJECTS) $(TARGET)
+
+$(TARGET) : $(COMPILED_OBJECTS)
+	$(CXX_LINKER) $(CXX_LINK_FLAGS) $(COMPILED_OBJECTS) /out:$(TARGET)

@@ -3,6 +3,9 @@
 
 #include <vector>
 #include <assert.h>
+#include <algorithm>
+
+#include "numeric_types.hxx"
 
 using std::vector;
 
@@ -12,12 +15,10 @@ public:
   // Vertex format stuff.
   //
 
-  enum IndexFormat : uint8_t {
-    IF_uint8,
-    IF_uint16,
-    IF_uint32,
-
-    IF_COUNT,
+  enum IndexType : uint8_t {
+    IT_uint8,
+    IT_uint16,
+    IT_uint32,
   };
 
   enum PrimitiveTopology : uint8_t {
@@ -28,25 +29,15 @@ public:
     PT_points,
   };
 
-  enum VertexColumnFormat : uint8_t {
-    VCF_r32g32b32a32_float,
-    VCF_r32g32b32_float,
-    VCF_r32g32_float,
-    VCF_r32_float,
-    VCF_r16g16b16_float,
-    VCF_r16_float,
-    VCF_r8g8b8a8_unorm,
-    VCF_r8g8b8a8_uint,
-    VCF_r8_unorm,
-
-    VCF_COUNT,
+  enum ComponentType : uint8_t {
+    CT_float32,
+    CT_float16,
+    CT_uint8,
   };
 
   enum VertexColumn : uint8_t {
     // X Y Z float
     VC_position,
-    // RGBA8
-    VC_color,
     // X Y float
     VC_texcoord,
     // X Y Z float
@@ -55,6 +46,9 @@ public:
     VC_tangent,
     // X Y Z float
     VC_binormal,
+    // RGBA8
+    VC_color,
+
     //
     // GPU skinning vertex information.
     //
@@ -147,43 +141,48 @@ public:
   };
 
 public:
-  struct VertexColumnFormatInfo {
-    int num_components;
-    // Byte size per component.
-    uint8_t component_size;
-  };
-
   struct VertexColumnInfo {
-    VertexColumnFormat format;
+    ComponentType component_type;
+    int num_components;
+    bool normalized;
   };
 
-  struct IndexFormatInfo {
-    uint8_t stride;
-  };
-
-public:
-
-  static VertexColumnFormatInfo vertex_column_format_info[VCF_COUNT];
   static VertexColumnInfo vertex_column_info[VC_COUNT];
 
-  static IndexFormatInfo index_format_info[3];
+public:
+  static ubyte index_type_size(IndexType type) {
+    switch (type) {
+    case IT_uint8:
+      return 1u;
+    case IT_uint16:
+      return 2u;
+    case IT_uint32:
+      return 4u;
+    }
+  }
+
+  static ubyte component_type_size(ComponentType type) {
+    switch (type) {
+    case CT_float32:
+      return 4u;
+    case CT_float16:
+      return 2u;
+    case CT_uint8:
+      return 1u;
+    }
+  }
 
   static uint32_t vertex_column_flag(VertexColumn column) {
     return 1u << (uint32_t)column;
   }
 
-  inline static uint8_t index_format_stride(IndexFormat fmt) {
-    return index_format_info[(int)fmt].stride;
-  }
-
   inline static uint8_t vertex_column_component_size(VertexColumn c) {
-    return vertex_column_format_info[vertex_column_info[(int)c].format].component_size;
+    return component_type_size(vertex_column_info[c].component_type);
   }
 
   inline static uint8_t vertex_column_stride(VertexColumn c) {
-    const VertexColumnInfo &cinfo = vertex_column_info[(int)c];
-    const VertexColumnFormatInfo &cfinfo = vertex_column_format_info[(int)cinfo.format];
-    return cfinfo.num_components * cfinfo.component_size;
+    const VertexColumnInfo &cinfo = vertex_column_info[c];
+    return cinfo.num_components * component_type_size(cinfo.component_type);
   }
 
   inline static size_t vertex_row_stride(VertexArrayFormat format) {
@@ -199,7 +198,9 @@ public:
   inline static size_t vertex_column_offset(VertexArrayFormat format, VertexColumn c) {
     size_t offset = 0u;
     for (int i = 0; i < (int)VC_COUNT && i < (int)c; ++i) {
-      offset += vertex_column_stride((VertexColumn)i);
+      if (format & (1 << i)) {
+        offset += vertex_column_stride((VertexColumn)i);
+      }
     }
     return offset;
   }
@@ -212,7 +213,7 @@ struct VertexFormat {
 
 struct VertexData {
   VertexFormat format;
-  vector<vector<unsigned char>> array_buffers;
+  vector<vector<ubyte>> array_buffers;
 
   inline int get_num_vertices() const {
     return array_buffers[0].size() / MaterialEnums::vertex_row_stride(format.arrays[0]);
@@ -220,12 +221,208 @@ struct VertexData {
 };
 
 struct IndexData {
-  MaterialEnums::IndexFormat format;
-  vector<unsigned char> buffer;
+  MaterialEnums::IndexType type;
+  vector<ubyte> buffer;
 
   inline int get_num_indices() const {
-    return buffer.size() / MaterialEnums::index_format_stride(format);
+    return buffer.size() / MaterialEnums::index_type_size(type);
   }
+};
+
+// Helper class to write vertex data.
+// The set_* methods do not resize the buffer, so use if you know the size
+// upfront or know that you're not going past the end of the buffer.
+// The add_* methods resize the buffer if you try to write past the end.
+class VertexWriter {
+public:
+  VertexWriter(VertexData *vdata, MaterialEnums::VertexColumn c) {
+    int array = -1;
+    // Find the array with the column.
+    for (int i = 0; i < vdata->format.arrays.size(); ++i) {
+      if (vdata->format.arrays[i] & (1 << c)) {
+        array = i;
+        break;
+      }
+    }
+
+    assert(array != -1);
+
+    // Note location in buffer/sizing.
+    _row_stride = MaterialEnums::vertex_row_stride(vdata->format.arrays[array]);
+    _position =
+        MaterialEnums::vertex_column_offset(vdata->format.arrays[array], c);
+    _offset = _position;
+    _buf = &vdata->array_buffers[array];
+    _column_info = &MaterialEnums::vertex_column_info[c];
+  }
+
+  inline ubyte *data(ubyte ofs = 0u) { return &_buf->at(_position + ofs); }
+
+  inline void inc_ptr() { _position += _row_stride; }
+
+  inline void set_row(int row) {
+    _position = row * _row_stride + _offset;
+  }
+
+  inline void write_data_iv(int *vals, int count) {
+    switch (_column_info->component_type) {
+
+    case MaterialEnums::CT_float32: {
+      float *ptr = (float *)data();
+      for (int i = 0; i < _column_info->num_components && i < count; ++i) {
+        ptr[i] = (float)vals[i];
+      }
+      break;
+    }
+
+    case MaterialEnums::CT_float16:
+      assert(false);
+      break;
+
+    case MaterialEnums::CT_uint8: {
+      ubyte *ptr = data();
+      for (int i = 0; i < _column_info->num_components && i < count; ++i) {
+        ptr[i] = vals[i];
+      }
+      break;
+    }
+    }
+  }
+
+  inline void write_data_fv(float *vals, int count) {
+    switch (_column_info->component_type) {
+
+    case MaterialEnums::CT_float32: {
+      float *ptr = (float *)data();
+      for (int i = 0; i < _column_info->num_components && i < count; ++i) {
+        ptr[i] = vals[i];
+      }
+      break;
+    }
+
+    case MaterialEnums::CT_float16:
+      assert(false);
+      break;
+
+    case MaterialEnums::CT_uint8: {
+      ubyte *ptr = data();
+      for (int i = 0; i < _column_info->num_components && i < count; ++i) {
+        if (_column_info->normalized) {
+          ptr[i] = std::clamp((u8)(vals[i] * 255.0f), (u8)0u, (u8)255u);
+        } else {
+          ptr[i] = (u8)vals[i];
+        }
+      }
+      break;
+    }
+    }
+  }
+
+  inline void set_data_1i(int val) {
+    write_data_iv(&val, 1);
+    inc_ptr();
+  }
+
+  inline void set_data_2i(int val1, int val2) {
+    int vals[2] = { val1, val2 };
+    write_data_iv(vals, 2);
+    inc_ptr();
+  }
+
+  inline void set_data_3i(int val1, int val2, int val3) {
+    int vals[3] = {val1, val2, val3};
+    write_data_iv(vals, 3);
+    inc_ptr();
+  }
+
+  inline void set_data_4i(int val1, int val2, int val3, int val4) {
+    int vals[4] = {val1, val2, val3, val4};
+    write_data_iv(vals, 4);
+    inc_ptr();
+  }
+
+  inline void set_data_1f(float val) {
+    write_data_fv(&val, 1);
+    inc_ptr();
+  }
+
+  inline void set_data_2f(float val1, float val2) {
+    float vals[2] = {val1, val2};
+    write_data_fv(vals, 2);
+    inc_ptr();
+  }
+
+  inline void set_data_3f(float val1, float val2, float val3) {
+    float vals[3] = {val1, val2, val3};
+    write_data_fv(vals, 3);
+    inc_ptr();
+  }
+
+  inline void set_data_4f(float val1, float val2, float val3, float val4) {
+    float vals[4] = {val1, val2, val3, val4};
+    write_data_fv(vals, 4);
+    inc_ptr();
+  }
+
+  inline bool is_at_end() const { return _position >= _buf->size(); }
+
+  inline void set_num_rows(int count) {
+    _buf->resize(count * _row_stride);
+  }
+
+  inline void ensure_buf_size() {
+    if (is_at_end()) {
+      _buf->resize(_position - _offset + _row_stride);
+    }
+  }
+
+  inline void add_data_1i(int val) {
+    ensure_buf_size();
+    set_data_1i(val);
+  }
+
+  inline void add_data_2i(int val1, int val2) {
+    ensure_buf_size();
+    set_data_2i(val1, val2);
+  }
+
+  inline void add_data_3i(int val1, int val2, int val3) {
+    ensure_buf_size();
+    set_data_3i(val1, val2, val3);
+  }
+
+  inline void add_data_4i(int val1, int val2, int val3, int val4) {
+    ensure_buf_size();
+    set_data_4i(val1, val2, val3, val4);
+  }
+
+  inline void add_data_1f(float val) {
+    ensure_buf_size();
+    set_data_1f(val);
+  }
+
+  inline void add_data_2f(float val1, float val2) {
+    ensure_buf_size();
+    set_data_2f(val1, val2);
+  }
+
+  inline void add_data_3f(float val1, float val2, float val3) {
+    ensure_buf_size();
+    set_data_3f(val1, val2, val3);
+  }
+
+  inline void add_data_4f(float val1, float val2, float val3, float val4) {
+    ensure_buf_size();
+    set_data_4f(val1, val2, val3, val4);
+  }
+
+private:
+  vector<ubyte> *_buf;
+  const MaterialEnums::VertexColumnInfo *_column_info;
+  int _offset;
+  int _row_stride;
+  // Byte position.
+  size_t _position;
 };
 
 // A mesh is simply a reference to a vertex buffer and an optional index buffer,

@@ -15,16 +15,20 @@ typedef HWND WindowHandle;
 #include "vulkan/vulkan.hpp"
 #include "vma/vk_mem_alloc.h"
 
+#include <vector>
+
 #include "material.hxx"
 
 struct VkBufferBase {
   // This one holds the GPU-local data of the vertex buffer.
   VkBuffer gpu_buffer = nullptr;
   VmaAllocation gpu_alloc = nullptr;
-  // The vertex data will be copied into this CPU-side buffer,
-  // then DMA'd into the GPU-local buffer.
-  VkBuffer staging_buffer = nullptr;
-  VmaAllocation staging_alloc = nullptr;
+};
+
+struct VkDeletionRequest {
+  VkBuffer buffer;
+  VmaAllocation alloc;
+  VkFence wait_fence;
 };
 
 struct VkIndexData : public VkBufferBase, public IndexData { };
@@ -86,6 +90,9 @@ public:
   VkCommandBuffer _current_transfer_command_buffer;
   VkFence _current_transfer_fence;
 
+  std::vector<VkDeletionRequest> _deletion_queue;
+  std::vector<VkFence> _created_deletion_fences;
+
 public:
   bool initialize(WindowHandle hwnd);
 
@@ -110,11 +117,19 @@ public:
   // Enqueue present/submit command buffer(s).
   bool end_frame_surface();
 
-  //  bool draw(const VertexData *vdata, const IndexData *idata, int first_vertex
+  void enqueue_buffer_deletion(VkBuffer buffer, VmaAllocation alloc);
 
-  //  VkVertexBuffer prepare_vertex_data(const VertexData *data, VkVertexBuffer **out);
+  void process_deletions();
 
-  IndexData *make_index_data(MaterialEnums::IndexFormat format, size_t initial_size = 0u);
+  bool draw(const VertexData *vdata, const IndexData *idata,
+            int first_vertex = 0, int num_vertices = -1);
+  bool draw_mesh(const Mesh *mesh);
+
+  void prepare_buffer(VkBufferBase *buffer, ubyte *data, size_t size, u32 buffer_usage);
+  void prepare_vertex_data(VertexData *data);
+  void prepare_index_data(IndexData *data);
+
+  IndexData *make_index_data(MaterialEnums::IndexType type, size_t initial_size = 0u);
   VertexData *make_vertex_data(const VertexFormat &format, size_t initial_size = 0u);
 
   VkShaderModule make_shader_module(const vector<uint8_t> &code);

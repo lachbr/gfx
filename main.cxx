@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <fstream>
 #include <unordered_set>
+#include <map>
+#include <sstream>
 
 typedef uint32_t u32;
 typedef uint16_t u16;
@@ -24,6 +26,7 @@ using std::vector;
 #include <windows.h>
 
 #include "renderer.hxx"
+#include "obj_reader.hxx"
 
 #include "linmath.hxx"
 
@@ -76,16 +79,183 @@ update_window() {
 }
 
 std::unordered_set<VertexData *> queued_vertex_data;
-VkVertexBuffer *vk_buf;
+std::unordered_set<IndexData *> queued_index_data;
+
+std::vector<Mesh> make_obj_meshes(const std::string &filename, RendererVk *render) {
+  std::vector<Mesh> out;
+
+  std::ifstream stream(filename);
+  if (!stream.good()) {
+    return out;
+  }
+
+  std::ostringstream ss;
+  ss << stream.rdbuf();
+  std::string data = ss.str();
+
+  ObjReader reader(data);
+
+  struct VertexKey {
+    float vertex[4];
+    float normal[3];
+    float texcoord[2];
+
+    bool operator<(const VertexKey &other) const {
+      for (int i = 0; i < 4; ++i) {
+        if (vertex[i] < other.vertex[i]) {
+          return true;
+        }
+      }
+      for (int i = 0; i < 3; ++i) {
+        if (normal[i] < other.normal[i]) {
+          return true;
+        }
+      }
+      for (int i = 0; i < 2; ++i) {
+        if (texcoord[i] < other.texcoord[i]) {
+          return true;
+        }
+      }
+      return false;
+    }
+  };
+  std::map<VertexKey, int> vertex_map;
+  std::map<const ObjFaceVert *, int> face_vert_map;
+
+  int vtx_count = 0;
+  int index_count = 0;
+  for (const ObjObject &obj : reader.objects) {
+    for (const ObjFace &face : obj.faces) {
+      index_count += (face.verts.size() - 2) * 3;
+      for (const ObjFaceVert &vert : face.verts) {
+        VertexKey key;
+        key.vertex[0] = reader.vertex[vert.vertex][0];
+        key.vertex[1] = reader.vertex[vert.vertex][2];
+        key.vertex[2] = reader.vertex[vert.vertex][1];
+        //float *pos = reader.vertex[vert.vertex];
+        key.normal[0] = 0.0f;
+        key.normal[1] = 0.0f;
+        key.normal[2] = 0.0f;
+        if (vert.normal != -1) {
+          key.normal[0] = reader.normal[vert.normal][0];
+          key.normal[1] = reader.normal[vert.normal][2];
+          key.normal[2] = reader.normal[vert.normal][1];
+        }
+        key.texcoord[0] = 0.0f;
+        key.texcoord[1] = 0.0f;
+        if (vert.texcoord != -1) {
+          key.texcoord[0] = reader.texcoord[vert.texcoord][0];
+          key.texcoord[1] = reader.texcoord[vert.texcoord][1];
+        }
+        auto it = vertex_map.find(key);
+        if (it == vertex_map.end()) {
+          face_vert_map.insert({ &vert, vtx_count });
+          vertex_map.insert({ key, vtx_count++ });
+        } else {
+          face_vert_map.insert({ &vert, it->second });
+        }
+      }
+    }
+  }
+
+  MaterialEnums::VertexArrayFormat format = 0u;
+  if (reader.vertex.size() > 0u) {
+    format |= MaterialEnums::vertex_column_flag(MaterialEnums::VC_position);
+  }
+  if (reader.normal.size() > 0u) {
+    format |= MaterialEnums::vertex_column_flag(MaterialEnums::VC_normal);
+  }
+  if (reader.texcoord.size() > 0u) {
+    format |= MaterialEnums::vertex_column_flag(MaterialEnums::VC_texcoord);
+  }
+  VertexData *vdata = render->make_vertex_data({{format}});
+
+  VertexWriter vwriter(vdata, MaterialEnums::VC_position);
+  vwriter.set_num_rows(vertex_map.size());
+
+  for (auto it : vertex_map) {
+    vwriter.set_row(it.second);
+    vwriter.set_data_3f(it.first.vertex[0], it.first.vertex[1],
+                        it.first.vertex[2]);
+  }
+
+  std::cout << "vertex map:\n";
+  for (auto it : vertex_map) {
+    std::cout << it.first.vertex[0] << ", " << it.first.vertex[1] << ", " << it.first.vertex[2] << "\n";
+  }
+
+  std::cout << "texcoord map:\n";
+  for (auto it : vertex_map) {
+    std::cout << it.first.texcoord[0] << ", " << it.first.texcoord[1] << "\n";
+  }
+
+  std::cout << "normal map:\n";
+  for (auto it : vertex_map) {
+    std::cout << it.first.normal[0] << ", " << it.first.normal[1] << ", " << it.first.normal[2] << "\n";
+  }
+
+  if (reader.normal.size() > 0u) {
+    VertexWriter nwriter(vdata, MaterialEnums::VC_normal);
+    for (auto it : vertex_map) {
+      nwriter.set_row(it.second);
+      nwriter.set_data_3f(it.first.normal[0], it.first.normal[1],
+                          it.first.normal[2]);
+    }
+  }
+
+  if (reader.texcoord.size() > 0u) {
+    VertexWriter twriter(vdata, MaterialEnums::VC_texcoord);
+    for (auto it : vertex_map) {
+      twriter.set_row(it.second);
+      twriter.set_data_2f(it.first.texcoord[0], it.first.texcoord[1]);
+    }
+  }
+
+  // Now build indices
+  IndexData *idata = render->make_index_data(MaterialEnums::IT_uint16);
+  idata->buffer.resize(index_count * sizeof(u16));
+  u16 *iptr = (u16 *)idata->buffer.data();
+  int index_ptr = 0;
+  for (ObjObject &obj : reader.objects) {
+    Mesh m;
+    m.vertex_data = vdata;
+    m.index_data = idata;
+    m.first_vertex = index_ptr;
+    for (ObjFace &face : obj.faces) {
+      for (int i = 0; i < face.verts.size() - 2; ++i) {
+        *iptr++ = face_vert_map[&face.verts[0]];
+        *iptr++ = face_vert_map[&face.verts[i + 1]];
+        *iptr++ = face_vert_map[&face.verts[i + 2]];
+        index_ptr += 3;
+      }
+    }
+    m.num_vertices = index_ptr - m.first_vertex;
+    m.topology = MaterialEnums::PT_triangle_list;
+    out.push_back(std::move(m));
+  }
+
+  queued_vertex_data.insert(vdata);
+  queued_index_data.insert(idata);
+
+  return out;
+}
+
+std::vector<Mesh> meshes;
 
 void
 render_frame(RendererVk *render) {
   render->begin_prepare();
   if (queued_vertex_data.size() > 0u) {
     for (VertexData *data : queued_vertex_data) {
-      render->prepare_vertex_data(data, &vk_buf);
+      render->prepare_vertex_data(data);
     }
     queued_vertex_data.clear();
+  }
+  if (queued_index_data.size() > 0u) {
+    for (IndexData *data : queued_index_data) {
+      render->prepare_index_data(data);
+    }
+    queued_index_data.clear();
   }
   render->end_prepare();
 
@@ -93,7 +263,9 @@ render_frame(RendererVk *render) {
 
   render->begin_frame_surface();
 
-  render->draw(&vk_buf, 1, 0, 3);
+  for (const Mesh &mesh : meshes) {
+    render->draw_mesh(&mesh);
+  }
 
   render->end_frame_surface();
 
@@ -110,38 +282,7 @@ main(int argc, char *argv[]) {
     return 1;
   }
 
-  VertexData vdata;
-  vdata.format.num_arrays = 1;
-  vdata.format.array_formats = { MaterialEnums::vertex_column_flag(MaterialEnums::VC_position) | MaterialEnums::vertex_column_flag(MaterialEnums::VC_color) };
-  vdata.array_buffers.resize(1);
-  vdata.array_buffers[0].resize(sizeof(float) * 8 * 3);
-  float *fdata = (float *)vdata.array_buffers[0].data();
-  fdata[0] = -1.0f;
-  fdata[1] = 20.0f;
-  fdata[2] = -1.0f;
-  fdata[3] = 1.0f;
-  fdata[4] = 1.0f;
-  fdata[5] = 0.0f;
-  fdata[6] = 0.0f;
-  fdata[7] = 1.0f;
-  fdata[8] = 1.0f;
-  fdata[9] = 20.0f;
-  fdata[10] = -1.0f;
-  fdata[11] = 1.0f;
-  fdata[12] = 0.0f;
-  fdata[13] = 1.0f;
-  fdata[14] = 0.0f;
-  fdata[15] = 1.0f;
-  fdata[16] = 1.0f;
-  fdata[17] = 20.0f;
-  fdata[18] = 1.0f;
-  fdata[19] = 1.0f;
-  fdata[20] = 0.0f;
-  fdata[21] = 0.0f;
-  fdata[22] = 1.0f;
-  fdata[23] = 1.0f;
-
-  queued_vertex_data.insert(&vdata);
+  meshes = make_obj_meshes("models\\cottage_obj.obj", &render);
 
   while (!window_closed) {
     update_window();

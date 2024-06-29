@@ -36,3 +36,5 @@
 *~
 *.pdb
 *.ilk
+
+!models/*.obj

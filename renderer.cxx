@@ -73,6 +73,17 @@ vk_physical_device_type_to_string(VkPhysicalDeviceType type) {
   }
 }
 
+VkIndexType get_vk_index_type(MaterialEnums::IndexType type) {
+  switch (type) {
+  case MaterialEnums::IT_uint32:
+    return VK_INDEX_TYPE_UINT32;
+  case MaterialEnums::IT_uint16:
+    return VK_INDEX_TYPE_UINT16;
+  case MaterialEnums::IT_uint8:
+    return VK_INDEX_TYPE_UINT8_KHR;
+  }
+}
+
 // Initialize vulkan.
 bool RendererVk::
 initialize(WindowHandle hwnd) {
@@ -190,11 +201,14 @@ bool RendererVk::
 init_temp() {
   VkResult result;
 
-  cam_params.model_mat = Matrix4x4::identity();
+  Vector3 model_hpr(45, 0, 45);
+
+  cam_params.model_mat = Matrix4x4::from_components(1.0f, 0.0f, model_hpr, 0.0f);
   cam_params.view_mat = Matrix4x4::identity();
-  cam_params.view_mat.set_cell(3, 2, -3.0f);
+  cam_params.view_mat.set_cell(3, 2, 0.0f);
+  cam_params.view_mat.set_cell(3, 1, -100.0f);
   cam_params.view_mat.invert();
-  cam_params.proj_mat = Matrix4x4::make_perspective_projection(1.5708f, 4.0f/3.0f, 0.1f, 1000.0f);
+  cam_params.proj_mat = Matrix4x4::make_perspective_projection(0.942478f, (float)_surface_extents.width / (float)_surface_extents.height, 1.0f, 500.0f);
 
   VkBufferCreateInfo ub_info = { };
   ub_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -249,8 +263,12 @@ init_temp() {
   VkPipelineLayoutCreateInfo pipeline_layout_create_info = { };
   pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   pipeline_layout_create_info.pNext = nullptr;
-  pipeline_layout_create_info.pushConstantRangeCount = 0;
-  pipeline_layout_create_info.pPushConstantRanges = nullptr;
+  VkPushConstantRange pcr = {};
+  pcr.size = sizeof(Matrix4x4);
+  pcr.offset = 0;
+  pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+  pipeline_layout_create_info.pushConstantRangeCount = 1;
+  pipeline_layout_create_info.pPushConstantRanges = &pcr;
   pipeline_layout_create_info.setLayoutCount = 1;
   pipeline_layout_create_info.pSetLayouts = &vk_desc_set_layout;
   result = vkCreatePipelineLayout(_device, &pipeline_layout_create_info, nullptr, &vk_pipeline_layout);
@@ -306,15 +324,20 @@ init_temp() {
   vi_binding.binding = 0;
   vi_binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
   vi_binding.stride = sizeof(float) * 8;
-  VkVertexInputAttributeDescription vi_attribs[2];
+  VkVertexInputAttributeDescription vi_attribs[3];
   vi_attribs[0].binding = 0;
   vi_attribs[0].location = 0;
-  vi_attribs[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  vi_attribs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
   vi_attribs[0].offset = 0;
   vi_attribs[1].binding = 0;
-  vi_attribs[1].location = 1;
-  vi_attribs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-  vi_attribs[1].offset = 16;
+  vi_attribs[1].location = 2;
+  vi_attribs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+  vi_attribs[1].offset = 20;
+  vi_attribs[2].binding = 0;
+  vi_attribs[2].location = 1;
+  vi_attribs[2].format = VK_FORMAT_R32G32_SFLOAT;
+  vi_attribs[2].offset = 12;
+
 
   // PIPELINE
   VkDynamicState dynamic_states[2];
@@ -327,7 +350,7 @@ init_temp() {
   vi.flags = 0;
   vi.vertexBindingDescriptionCount = 1;
   vi.pVertexBindingDescriptions = &vi_binding;
-  vi.vertexAttributeDescriptionCount = 2;
+  vi.vertexAttributeDescriptionCount = 3;
   vi.pVertexAttributeDescriptions = vi_attribs;
   VkPipelineInputAssemblyStateCreateInfo ia = { };
   ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -339,7 +362,7 @@ init_temp() {
   rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
   rs.pNext = nullptr;
   rs.flags = 0;
-  rs.cullMode = VK_CULL_MODE_NONE;
+  rs.cullMode = VK_CULL_MODE_BACK_BIT;
   rs.depthBiasClamp = 0.0f;
   rs.depthBiasEnable = VK_FALSE;
   rs.depthClampEnable = VK_FALSE;
@@ -406,12 +429,14 @@ init_temp() {
   shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
   shader_stages[0].pName = "main";
   shader_stages[0].module = vk_vtx_module;
+  shader_stages[0].flags = 0;
   shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   shader_stages[1].pNext = nullptr;
   shader_stages[1].pSpecializationInfo = nullptr;
   shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
   shader_stages[1].pName = "main";
   shader_stages[1].module = vk_frag_module;
+  shader_stages[1].flags = 0;
   VkPipelineRenderingCreateInfo r_info = { };
   r_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
   r_info.pNext = nullptr;
@@ -977,6 +1002,8 @@ bool RendererVk::
 begin_prepare() {
   VkResult result;
 
+  process_deletions();
+
   // Wait for the transfer command buffer to be ready.
   result = vkWaitForFences(_device, 1, &_current_transfer_fence, VK_TRUE, UINT64_MAX);
   if (!vk_error_check(result, "wait for transfer cmd buf")) {
@@ -1068,68 +1095,6 @@ begin_frame() {
   return true;
 }
 
-// Submits the command buffer and queues the present operation.
-// If necessary in the future, we could split the present out into a
-// separate method that presents all windows (if we have multiple windows).
-bool RendererVk::
-end_frame() {
-  VkResult result;
-
-  result = vkEndCommandBuffer(_current_command_buffer);
-  if (!vk_error_check(result, "end cmd buf")) {
-    return false;
-  }
-
-  // Now submit.
-  VkCommandBuffer bufs[] = { _current_command_buffer };
-  // Wait on the swapchain image *and* for all transfers to complete.
-  VkPipelineStageFlags pipe_flags[2] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT };
-  VkSemaphore wait_semas[2] = { _current_image_acquired_semaphore, _current_transfer_semaphore };
-  VkSubmitInfo submit_info = { };
-  submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  // Wait, on the gpu, for the current swapchain image to become available,
-  // before writing to the color attachment (which would be the swapchain image).
-  submit_info.waitSemaphoreCount = 2;
-  submit_info.pWaitSemaphores = wait_semas;
-  submit_info.pWaitDstStageMask = pipe_flags;
-  submit_info.commandBufferCount = 1;
-  submit_info.pCommandBuffers = bufs;
-  // Signal this semaphore on the GPU when the command buffer finishes.
-  // The present operation will wait on this semaphore.
-  submit_info.signalSemaphoreCount = 1;
-  submit_info.pSignalSemaphores = &_current_draw_semaphore;
-  // _current_draw_fence will be signaled to the CPU when the command buffer
-  // is finished on the GPU side and can be re-used.
-  result = vkQueueSubmit(_gfx_queue, 1, &submit_info, _current_draw_fence);
-  if (!vk_error_check(result, "submit cmd buf")) {
-    return false;
-  }
-
-  // Now, present!
-  VkPresentInfoKHR present_info = { };
-  present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-  present_info.pNext = nullptr;
-  present_info.swapchainCount = 1;
-  present_info.pSwapchains = &_swapchain;
-  present_info.pImageIndices = &_curr_swapchain_image_index;
-  // Wait, on the GPU, for the semaphore signaled by the GPU
-  // when the command buffer finishes executing.  We can present
-  // at that point.
-  present_info.waitSemaphoreCount = 1;
-  present_info.pWaitSemaphores = &_current_draw_semaphore;
-  present_info.pResults = nullptr;
-  result = vkQueuePresentKHR(_present_queue, &present_info);
-  if (!vk_error_check(result, "queue present")) {
-    return false;
-  }
-
-  // Cycle to the next frame to record another frame while the
-  // GPU is processing the one we just submitted.
-  cycle_frame();
-
-  return true;
-}
-
 // Begins drawing to the surface/graphics output.
 bool RendererVk::
 begin_frame_surface() {
@@ -1194,7 +1159,7 @@ begin_frame_surface() {
   render_info.pColorAttachments = &color_attach;
   render_info.pDepthAttachment = &depth_attach;
   render_info.pStencilAttachment = nullptr;
-  render_info.flags = VK_RENDERING_CONTENTS_INLINE_BIT_EXT;
+  render_info.flags = 0;//VK_RENDERING_CONTENTS_INLINE_BIT_EXT;
   render_info.viewMask = 0;
   render_info.renderArea.offset.x = 0;
   render_info.renderArea.offset.y = 0;
@@ -1249,23 +1214,185 @@ end_frame_surface() {
   return true;
 }
 
-bool RendererVk::
-draw(VkVertexBuffer **bufs, int buf_count, int first_vertex, int num_vertices) {
-  vkCmdBindPipeline(_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
-  vkCmdBindDescriptorSets(_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline_layout, 0, 1, &vk_desc_set, 0, nullptr);
-  VkBuffer *vkbufs = (VkBuffer *)alloca(sizeof(VkBuffer) * buf_count);
-  for (int i = 0; i < buf_count; ++i) {
-    vkbufs[i] = bufs[i]->gpu_buffer;
-  }
-  VkDeviceSize *offsets = (VkDeviceSize *)alloca(sizeof(VkDeviceSize) * buf_count);
-  for (int i = 0; i < buf_count; ++i) {
-    offsets[i] = 0;
-  }
-  vkCmdBindVertexBuffers(_current_command_buffer, 0, buf_count, vkbufs, offsets);
+// Enqueues a buffer for deletion.  The current frame cycle index is noted
+// along with the request.  The buffer won't actually be deleted until the
+// the command buffer associated with the frame cycle index is no longer being
+// processed by the GPU.
+void RendererVk::enqueue_buffer_deletion(VkBuffer buffer, VmaAllocation alloc) {
+  VkDeletionRequest req;
+  req.buffer = buffer;
+  req.alloc = alloc;
+  req.wait_fence = nullptr;
+  std::cout << "Enqueing buf " << buffer << " to delete\n";
+  _deletion_queue.push_back(std::move(req));
+}
 
-  vkCmdDraw(_current_command_buffer, num_vertices, 1, first_vertex, 0);
+
+void RendererVk::process_deletions() {
+  if (_deletion_queue.empty()) {
+    return;
+  }
+
+  for (int i = (int)_deletion_queue.size() - 1; i >= 0; --i) {
+    if (_deletion_queue[i].wait_fence == nullptr) {
+      VkFenceCreateInfo fence_info = {};
+      fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+      fence_info.pNext = nullptr;
+      fence_info.flags = 0;
+      VkResult result = vkCreateFence(_device, &fence_info, nullptr,
+                                      &_deletion_queue[i].wait_fence);
+      assert(result == VK_SUCCESS);
+      _created_deletion_fences.push_back(_deletion_queue[i].wait_fence);
+      std::cout << "Created wait fence for " << _deletion_queue[i].buffer << " to be deleted\n";
+
+    } else if (vkGetFenceStatus(_device, _deletion_queue[i].wait_fence) ==
+               VK_SUCCESS) {
+      // The fence was signaled, meaning that the device is finished with the
+      // buffer.  We can go ahead and delete it now.
+      std::cout << "Deletion wait fence for " << _deletion_queue[i].buffer << " is signaled, deleting now\n";
+      vmaDestroyBuffer(_alloc, _deletion_queue[i].buffer,
+                       _deletion_queue[i].alloc);
+      vkDestroyFence(_device, _deletion_queue[i].wait_fence, nullptr);
+      _deletion_queue.erase(_deletion_queue.begin() + i);
+    }
+  }
+}
+
+// Submits the command buffer and queues the present operation.
+// If necessary in the future, we could split the present out into a
+// separate method that presents all windows (if we have multiple windows).
+bool RendererVk::
+end_frame() {
+  VkResult result;
+
+  result = vkEndCommandBuffer(_current_command_buffer);
+  if (!vk_error_check(result, "end cmd buf")) {
+    return false;
+  }
+
+  // Now submit.
+  VkCommandBuffer bufs[] = { _current_command_buffer };
+  // Wait on the swapchain image *and* for all transfers to complete.
+  VkPipelineStageFlags pipe_flags[2] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT };
+  VkSemaphore wait_semas[2] = { _current_image_acquired_semaphore, _current_transfer_semaphore };
+  VkSubmitInfo submit_info = { };
+  submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submit_info.pNext = nullptr;
+  // Wait, on the gpu, for the current swapchain image to become available,
+  // before writing to the color attachment (which would be the swapchain image).
+  submit_info.waitSemaphoreCount = 2;
+  submit_info.pWaitSemaphores = wait_semas;
+  submit_info.pWaitDstStageMask = pipe_flags;
+  submit_info.commandBufferCount = 1;
+  submit_info.pCommandBuffers = bufs;
+  // Signal this semaphore on the GPU when the command buffer finishes.
+  // The present operation will wait on this semaphore.
+  submit_info.signalSemaphoreCount = 1;
+  submit_info.pSignalSemaphores = &_current_draw_semaphore;
+  // _current_draw_fence will be signaled to the CPU when the command buffer
+  // is finished on the GPU side and can be re-used.
+  result = vkQueueSubmit(_gfx_queue, 1, &submit_info, _current_draw_fence);
+  if (!vk_error_check(result, "submit cmd buf")) {
+    return false;
+  }
+
+  if (!_created_deletion_fences.empty()) {
+    // Tack on fence signals to know when resources queued for deletion
+    // are done being used.
+    VkSubmitInfo fence_submit = {};
+    fence_submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    fence_submit.pNext = nullptr;
+    fence_submit.commandBufferCount = 0;
+    fence_submit.pCommandBuffers = nullptr;
+    fence_submit.signalSemaphoreCount = 0;
+    fence_submit.pSignalSemaphores = nullptr;
+    fence_submit.waitSemaphoreCount = 0;
+    fence_submit.pWaitSemaphores = nullptr;
+    fence_submit.pWaitDstStageMask = nullptr;
+    for (const VkFence &fence : _created_deletion_fences) {
+      result = vkQueueSubmit(_gfx_queue, 1, &fence_submit, fence);
+      if (!vk_error_check(result, "submit deletion fence")) {
+        return false;
+      }
+    }
+    _created_deletion_fences.clear();
+  }
+
+  // Now, present!
+  VkPresentInfoKHR present_info = { };
+  present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+  present_info.pNext = nullptr;
+  present_info.swapchainCount = 1;
+  present_info.pSwapchains = &_swapchain;
+  present_info.pImageIndices = &_curr_swapchain_image_index;
+  // Wait, on the GPU, for the semaphore signaled by the GPU
+  // when the command buffer finishes executing.  We can present
+  // at that point.
+  present_info.waitSemaphoreCount = 1;
+  present_info.pWaitSemaphores = &_current_draw_semaphore;
+  present_info.pResults = nullptr;
+  result = vkQueuePresentKHR(_present_queue, &present_info);
+  if (!vk_error_check(result, "queue present")) {
+    return false;
+  }
+
+  // Cycle to the next frame to record another frame while the
+  // GPU is processing the one we just submitted.
+  cycle_frame();
 
   return true;
+}
+
+bool RendererVk::draw(const VertexData *vdata, const IndexData *idata,
+                      int first_vertex, int num_vertices) {
+  const VkVertexData *vk_vdata = (const VkVertexData *)vdata;
+  const VkIndexData *vk_idata = (const VkIndexData *)idata;
+
+  vkCmdBindPipeline(_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
+  vkCmdBindDescriptorSets(_current_command_buffer,
+                          VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline_layout,
+                          0, 1, &vk_desc_set, 0, nullptr);
+
+  bool indexed = vk_idata != nullptr;
+
+  if (indexed) {
+    vkCmdBindIndexBuffer(_current_command_buffer, vk_idata->gpu_buffer, 0, get_vk_index_type(vk_idata->type));
+  }
+
+  if (num_vertices <= 0) {
+    if (indexed) {
+      assert(first_vertex >= 0 && first_vertex < vk_idata->get_num_indices());
+      num_vertices = vk_idata->get_num_indices() - first_vertex;
+    } else {
+      assert(first_vertex >= 0 && first_vertex < vk_vdata->get_num_vertices());
+      num_vertices = vk_vdata->get_num_vertices() - first_vertex;
+    }
+  }
+
+  size_t vbuf_count = vk_vdata->vk_buffers.size();
+  VkBuffer *vkbufs = (VkBuffer *)alloca(sizeof(VkBuffer) * vbuf_count);
+  for (int i = 0; i < vbuf_count; ++i) {
+    vkbufs[i] = vk_vdata->vk_buffers[i].gpu_buffer;
+  }
+  VkDeviceSize *offsets = (VkDeviceSize *)alloca(sizeof(VkDeviceSize) * vbuf_count);
+  for (int i = 0; i < vbuf_count; ++i) {
+    offsets[i] = 0;
+  }
+  vkCmdBindVertexBuffers(_current_command_buffer, 0, vbuf_count, vkbufs, offsets);
+
+  if (indexed) {
+    vkCmdDrawIndexed(_current_command_buffer, num_vertices, 1, first_vertex, 0, 0);
+  } else {
+    vkCmdDraw(_current_command_buffer, num_vertices, 1, first_vertex, 0);
+  }
+
+  return true;
+}
+
+bool RendererVk::draw_mesh(const Mesh *mesh) {
+  // TODO: set primitive topology, needs pipeline switch.
+  return draw(mesh->vertex_data, mesh->index_data, mesh->first_vertex,
+              mesh->num_vertices);
 }
 
 // Cycles the command buffer in use by the CPU for recording commands.
@@ -1287,73 +1414,90 @@ update_frame_objects() {
   _current_transfer_fence = _transfer_fences[_frame_cycle_index];
 }
 
-void RendererVk::
-prepare_vertex_data(const VertexData *data, VkVertexBuffer **out) {
+// Initializes a VkBuffer an enqueues a transfer into device-local memory using
+// the provided client-side data buffer.  Ideal for a static vertex/index buffer.
+void RendererVk::prepare_buffer(VkBufferBase *buffer, ubyte *data,
+                                size_t size, u32 buffer_usage) {
+  if (buffer->gpu_buffer != nullptr) {
+    return;
+  }
+
   VkResult result;
 
-  for (size_t i = 0; i < data->array_buffers.size(); ++i) {
-    VkVertexBuffer *buf = new VkVertexBuffer;
+  VkBufferCreateInfo staging_info = { };
+  staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  staging_info.pNext = nullptr;
+  staging_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  staging_info.flags = 0;
+  staging_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  staging_info.size = size;
+  staging_info.queueFamilyIndexCount = 0;
+  staging_info.pQueueFamilyIndices = nullptr;
+  VmaAllocationCreateInfo staging_alloc_info = { };
+  staging_alloc_info.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+  VkBuffer staging_buffer = nullptr;
+  VmaAllocation staging_alloc = nullptr;
+  result = vmaCreateBuffer(_alloc, &staging_info, &staging_alloc_info, &staging_buffer, &staging_alloc, nullptr);
 
-    VkBufferCreateInfo staging_info = { };
-    staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    staging_info.pNext = nullptr;
-    staging_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    staging_info.flags = 0;
-    staging_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    staging_info.size = data->array_buffers[i].size();
-    staging_info.queueFamilyIndexCount = 0;
-    staging_info.pQueueFamilyIndices = nullptr;
-    VmaAllocationCreateInfo staging_alloc_info = { };
-    staging_alloc_info.usage = VMA_MEMORY_USAGE_CPU_ONLY;
-    result = vmaCreateBuffer(_alloc, &staging_info, &staging_alloc_info, &buf->staging_buffer, &buf->staging_alloc, nullptr);
-
-    VkBufferCreateInfo create_info = { };
-    create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    create_info.pNext = nullptr;
-    create_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    create_info.size = data->array_buffers[i].size();
-    create_info.queueFamilyIndexCount = 0;
-    create_info.pQueueFamilyIndices = nullptr;
-    create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    create_info.flags = 0;
-    VmaAllocationCreateInfo vbuf_alloc_info = { };
-    vbuf_alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-    result = vmaCreateBuffer(_alloc, &create_info, &vbuf_alloc_info, &buf->gpu_buffer, &buf->gpu_alloc, nullptr);
-    if (!vk_error_check(result, "create vbuffer")) {
-      return;
-    }
-
-    // Copy data into staging buffer.
-    unsigned char *vbuf_ptr = nullptr;
-    result = vmaMapMemory(_alloc, buf->staging_alloc, (void **)&vbuf_ptr);
-    if (!vk_error_check(result, "map vbuffer")) {
-      return;
-    }
-
-    memcpy(vbuf_ptr, data->array_buffers[i].data(), data->array_buffers[i].size());
-    vmaUnmapMemory(_alloc, buf->staging_alloc);
-
-    // Now queue the data transfer to GPU-local.
-    VkBufferCopy region = { };
-    region.srcOffset = 0;
-    region.dstOffset = 0;
-    region.size = data->array_buffers[i].size();
-    vkCmdCopyBuffer(_current_transfer_command_buffer, buf->staging_buffer, buf->gpu_buffer, 1, &region);
-
-    out[i] = buf;
+  VkBufferCreateInfo create_info = { };
+  create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  create_info.pNext = nullptr;
+  create_info.usage = buffer_usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  create_info.size = size;
+  create_info.queueFamilyIndexCount = 0;
+  create_info.pQueueFamilyIndices = nullptr;
+  create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  create_info.flags = 0;
+  VmaAllocationCreateInfo vbuf_alloc_info = { };
+  vbuf_alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  result = vmaCreateBuffer(_alloc, &create_info, &vbuf_alloc_info, &buffer->gpu_buffer, &buffer->gpu_alloc, nullptr);
+  if (!vk_error_check(result, "create buffer")) {
+    return;
   }
+
+  // Copy data into staging buffer.
+  unsigned char *vbuf_ptr = nullptr;
+  result = vmaMapMemory(_alloc, staging_alloc, (void **)&vbuf_ptr);
+  if (!vk_error_check(result, "map buffer")) {
+    return;
+  }
+
+  memcpy(vbuf_ptr, data, size);
+  vmaUnmapMemory(_alloc, staging_alloc);
+
+  // Now queue the data transfer to GPU-local.
+  VkBufferCopy region = { };
+  region.srcOffset = 0;
+  region.dstOffset = 0;
+  region.size = size;
+  vkCmdCopyBuffer(_current_transfer_command_buffer, staging_buffer,
+                  buffer->gpu_buffer, 1, &region);
+
+  enqueue_buffer_deletion(staging_buffer, staging_alloc);
+}
+
+void RendererVk::
+prepare_vertex_data(VertexData *data) {
+  VkVertexData *vkdata = (VkVertexData *)data;
+  vkdata->vk_buffers.resize(data->array_buffers.size());
+  for (size_t i = 0; i < data->array_buffers.size(); ++i) {
+    prepare_buffer(&vkdata->vk_buffers[i], data->array_buffers[i].data(), data->array_buffers[i].size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  }
+}
+
+void RendererVk::prepare_index_data(IndexData *data) {
+  VkIndexData *vkdata = (VkIndexData *)data;
+  prepare_buffer(vkdata, data->buffer.data(), data->buffer.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 }
 
 // Acquires an index buffer resource from the renderer.
 // The user is responsible for releasing the resource back to the renderer.
 IndexData *RendererVk::
-make_index_data(MaterialEnums::IndexFormat format, size_t initial_size) {
+make_index_data(MaterialEnums::IndexType type, size_t initial_size) {
   VkIndexData *data = new VkIndexData;
-  data->format = format;
+  data->type = type;
   data->gpu_buffer = nullptr;
-  data->staging_buffer = nullptr;
   data->gpu_alloc = nullptr;
-  data->staging_alloc = nullptr;
   if (initial_size > 0u) {
     data->buffer.resize(initial_size);
   }
@@ -1366,11 +1510,11 @@ VertexData *RendererVk::
 make_vertex_data(const VertexFormat &format, size_t initial_size) {
   VkVertexData *data = new VkVertexData;
   data->format = format;
-  data->vk_buffers.resize(format.num_arrays);
-  memset(data->vk_buffers.data(), 0, sizeof(VkVertexBuffer) * format.num_arrays);
-  data->array_buffers.resize(format.num_arrays);
+  data->vk_buffers.resize(format.arrays.size());
+  memset(data->vk_buffers.data(), 0, sizeof(VkVertexBuffer) * data->vk_buffers.size());
+  data->array_buffers.resize(data->vk_buffers.size());
   if (initial_size >= 0u) {
-    for (int i = 0; i < format.num_arrays; ++i) {
+    for (int i = 0; i < data->array_buffers.size(); ++i) {
       data->array_buffers[i].resize(initial_size);
     }
   }

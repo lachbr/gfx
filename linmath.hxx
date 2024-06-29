@@ -3,9 +3,13 @@
 
 #include <assert.h>
 #include <cmath>
+#define _USE_MATH_DEFINES
 #include <math.h>
 #include <float.h>
 #include <iostream>
+
+inline float deg_2_rad(float deg) { return deg * (M_PI / 180.0f); }
+inline float rad_2_deg(float rad) { return rad * (180.0f / M_PI); }
 
 class Vector3 {
 public:
@@ -279,6 +283,79 @@ public:
     out._data[3][1] = -(top + bottom) / (top - bottom);
     out._data[3][2] = -(far_dist + near_dist) / (far_dist - near_dist);
     out._data[3][3] = 1.0f;
+    return out;
+  }
+
+  inline static Matrix4x4 scale_shear_mat(const Vector3 &scale,
+                                          const Vector3 &shear) {
+    Matrix4x4 out = identity();
+    out._data[0][0] = scale[0];
+    out._data[0][1] = shear[0] * scale[0];
+    out._data[0][2] = 0.0f;
+    out._data[1][0] = 0.0f;
+    out._data[1][1] = scale[1];
+    out._data[1][2] = 0.0f;
+    out._data[2][0] = shear[1] * scale[1];
+    out._data[2][1] = shear[2] * scale[2];
+    out._data[2][2] = scale[2];
+    return out;
+  }
+
+  inline static Matrix4x4 rotate_mat_normaxis(float angle,
+                                              const Vector3 &axis) {
+
+    float angle_rad = deg_2_rad(angle);
+    float s = std::sin(angle);
+    float c = std::cos(angle);
+    float t = 1.0f - c;
+
+    float t0, t1, t2, s0, s1, s2;
+    t0 = t * axis[0];
+    t1 = t * axis[1];
+    t2 = t * axis[2];
+    s0 = s * axis[0];
+    s1 = s * axis[1];
+    s2 = s * axis[2];
+
+    Matrix4x4 out = identity();
+    out._data[0][0] = t0 * axis[0] + c;
+    out._data[0][1] = t0 * axis[1] + s2;
+    out._data[0][2] = t0 * axis[2] - s1;
+    out._data[1][0] = t1 * axis[0] - s2;
+    out._data[1][1] = t1 * axis[1] + c;
+    out._data[1][2] = t1 * axis[2] + s0;
+    out._data[2][0] = t2 * axis[0] + s1;
+    out._data[2][1] = t2 * axis[1] - s0;
+    out._data[2][2] = t2 * axis[2] + c;
+
+    return out;
+  }
+
+  inline static Matrix4x4 from_components(const Vector3 &scale,
+                                          const Vector3 &shear,
+                                          const Vector3 &hpr,
+                                          const Vector3 &translate) {
+    Matrix4x4 out;
+
+    // Scale and shear.
+    out = scale_shear_mat(scale, shear);
+
+    // Rotate.
+    if (hpr[2] != 0.0f) {
+      out *= rotate_mat_normaxis(hpr[2], Vector3::forward());
+    }
+    if (hpr[1] != 0.0f) {
+      out *= rotate_mat_normaxis(hpr[1], Vector3::right());
+    }
+    if (hpr[0] != 0.0f) {
+      out *= rotate_mat_normaxis(hpr[0], Vector3::up());
+    }
+
+    // Translate
+    out._data[3][0] = translate[0];
+    out._data[3][1] = translate[1];
+    out._data[3][2] = translate[2];
+
     return out;
   }
 

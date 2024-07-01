@@ -16,6 +16,7 @@ typedef HWND WindowHandle;
 #include "vma/vk_mem_alloc.h"
 
 #include <vector>
+#include <unordered_map>
 
 #include "material.hxx"
 
@@ -42,8 +43,21 @@ struct VkVertexData : public VertexData {
 //  MaterialEnums::Mesh
 //};
 
-struct ShaderStageVk {
-  VkShaderModule module;
+// A shader is responsible for taking in a material/vertex format and outputting
+// a graphics pipeline + descriptor sets.
+class ShaderVk {
+  struct PipelineKey {
+    const StaticMaterialData *mat;
+    MaterialEnums::VertexArrayFormat fmt;
+  };
+
+  struct PipelineValue {
+    VkPipeline pipeline;
+    std::vector<VkDescriptorSet> descriptor_sets;
+  };
+
+  typedef std::unordered_map<PipelineKey, PipelineValue> PipelineCache;
+  PipelineCache _pipeline_cache;
 };
 
 class RendererVk {

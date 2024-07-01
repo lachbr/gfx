@@ -229,6 +229,89 @@ struct IndexData {
   }
 };
 
+class IndexWriter {
+public:
+  IndexWriter(IndexData *idata) {
+    _buf = &idata->buffer;
+    _data = idata;
+  }
+
+  inline void set_row(int row) {
+    _position = row * MaterialEnums::index_type_size(_data->type);
+  }
+
+  inline void reserve_num_rows(int count) {
+    _buf->reserve(count * MaterialEnums::index_type_size(_data->type));
+  }
+
+  inline void set_num_rows(int count) {
+    _buf->resize(count * MaterialEnums::index_type_size(_data->type));
+  }
+
+  inline void inc_ptr() {
+    _position += MaterialEnums::index_type_size(_data->type);
+  }
+
+  inline void ensure_buf_size() {
+    if (_position >= _buf->size()) {
+      _buf->resize(_position + MaterialEnums::index_type_size(_data->type));
+    }
+  }
+
+  inline void write(u32 val) {
+    switch (_data->type) {
+    case MaterialEnums::IT_uint8:
+      *(u8 *)&_buf->at(_position) = val;
+      break;
+    case MaterialEnums::IT_uint16:
+      *(u16 *)&_buf->at(_position) = val;
+      break;
+    case MaterialEnums::IT_uint32:
+      *(u32 *)&_buf->at(_position) = val;
+      break;
+    }
+    inc_ptr();
+  }
+
+  inline void write(u32 v1, u32 v2, u32 v3) {
+    write(v1);
+    write(v2);
+    write(v3);
+  }
+
+  inline void write_v(u32 *vals, int count) {
+    for (int i = 0; i < count; ++i) {
+      write(vals[i]);
+    }
+  }
+
+  inline void add(u32 val) {
+    ensure_buf_size();
+    write(val);
+  }
+
+  inline void add(u32 v1, u32 v2, u32 v3) {
+    ensure_buf_size();
+    write(v1);
+    ensure_buf_size();
+    write(v2);
+    ensure_buf_size();
+    write(v3);
+  }
+
+  inline void add_v(u32 *vals, int count) {
+    for (int i = 0; i < count; ++i) {
+      ensure_buf_size();
+      write(vals[i]);
+    }
+  }
+
+private:
+  const IndexData *_data;
+  vector<ubyte> *_buf;
+  size_t _position;
+};
+
 // Helper class to write vertex data.
 // The set_* methods do not resize the buffer, so use if you know the size
 // upfront or know that you're not going past the end of the buffer.
@@ -442,26 +525,20 @@ struct Mesh {
   }
 };
 
+class Renderer {
+};
+
 // A shader implementation is responsible for supplying a graphics pipeline
 // state from a material and mesh vertex format.
 //
 // It typically also corresponds to a particular set of shader modules.
 class Shader {
-
+public:
+  //virtual
 };
 
-// A material defines parameters to a particular Shader implementation.
-// It may also define fixed-function render state params, though it's up
-// to the Shader whether or not it is respected.
-class Material : public MaterialEnums {
-public:
-
-
-
-public:
-  inline Shader *get_shader() const { return _shader; }
-
-private:
+// Fixed material data.
+struct StaticMaterialData : public MaterialEnums {
   Shader *_shader;
   unsigned int _state_flags;
   float _line_width;
@@ -473,6 +550,21 @@ private:
   TransparencyMode _transparency;
   CompareOp _alpha_test_func;
   bool _depth_write;
+};
+
+// A material defines parameters to a particular Shader implementation.
+// It may also define fixed-function render state params, though it's up
+// to the Shader whether or not it is respected.
+class Material : public MaterialEnums {
+public:
+
+public:
+  inline Shader *get_shader() const { return _shader; }
+
+  inline StaticMaterialData *get_static_data() const { return _static_data; }
+
+private:
+  const StaticMaterialData *_static_data;
 };
 
 #endif // MATERIAL_HXX

@@ -1,6 +1,7 @@
 #include <iostream>
 
 #include "renderer.hxx"
+#include "spirv_reflect.h"
 #include "vulkan/vulkan_core.h"
 
 #include "linmath.hxx"

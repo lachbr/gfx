@@ -38,6 +38,14 @@ struct VkVertexData : public VertexData {
   vector<VkVertexBuffer> vk_buffers;
 };
 
+//struct PipelineCacheKey {
+//  MaterialEnums::Mesh
+//};
+
+struct ShaderStageVk {
+  VkShaderModule module;
+};
+
 class RendererVk {
 public:
   VkInstance _instance;
